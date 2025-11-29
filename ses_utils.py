@@ -170,8 +170,9 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
 
     inc_qs = _bands("average_income", "income_band")
     
-    # Define categorical columns to use
+    # Define categorical columns to use (DEDUPLICATED)
     ses_cat_cols = []
+    seen = set()
     cat_keys = ["school", "grade", "house_ownership", "i_live_with",
                 "father_s_education", "mother_s_education",
                 "father_s_job", "mother_s_job",
@@ -180,10 +181,13 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
                 
     for key in cat_keys:
         col = ses_map.get(key)
-        if col is not None and col in df2.columns:
+        # Check if column exists AND hasn't been added yet
+        if col is not None and col in df2.columns and col not in seen:
             ses_cat_cols.append(col)
+            seen.add(col)
             
-    if "income_band" in df2.columns: ses_cat_cols.append("income_band")
+    if "income_band" in df2.columns and "income_band" not in seen: 
+        ses_cat_cols.append("income_band")
 
     # Drop raw numeric columns that we have converted or don't need
     raw_numeric_drop = []
@@ -201,7 +205,11 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
 # ------------------------- UI + explainability ---------------------------
 def build_ses_ui(df: pd.DataFrame, ses_cat_cols):
     import streamlit as st
-    ses_cols = [c for c in ses_cat_cols if c in df.columns]
+    
+    # Ensure columns are unique before generating UI
+    seen = set()
+    ses_cols = [c for c in ses_cat_cols if c in df.columns and not (c in seen or seen.add(c))]
+    
     ses_vals = {}
     if not ses_cols: return ses_vals, []
     
@@ -219,6 +227,7 @@ def build_ses_ui(df: pd.DataFrame, ses_cat_cols):
             opts = ["Unknown"]
             
         default = df[c].mode(dropna=True).iloc[0] if not df[c].dropna().empty else opts[0]
+        # Use column name as key to ensure uniqueness if necessary, though list is deduplicated
         with cols[i % 2]:
             ses_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
     return ses_vals, ses_cols
