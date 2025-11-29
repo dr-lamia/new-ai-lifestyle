@@ -128,7 +128,7 @@ NORMALIZERS = {
     "access_to": norm_access,
     "affordability": norm_afford,
     "frequency": norm_visit_freq,
-    "pocket_money": norm_yes_no,  # Added to treat as categorical Yes/No
+    "pocket_money": norm_yes_no,
 }
 
 # ---------------------- column detection + prep --------------------------
@@ -154,7 +154,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
         if k in NORMALIZERS:
             df2[col] = df2[col].apply(NORMALIZERS[k])
 
-    # Compute income bands (exclude pocket_money as it is categorical here)
+    # Compute income bands
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
         if col is None or col not in df2.columns: return None
@@ -177,11 +177,10 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
                 "father_s_education", "mother_s_education",
                 "father_s_job", "mother_s_job",
                 "insurance", "access_to", "frequency", "affordability", 
-                "pocket_money"] # Added pocket_money explicitly
+                "pocket_money"]
                 
     for key in cat_keys:
         col = ses_map.get(key)
-        # Check if column exists AND hasn't been added yet
         if col is not None and col in df2.columns and col not in seen:
             ses_cat_cols.append(col)
             seen.add(col)
@@ -189,7 +188,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     if "income_band" in df2.columns and "income_band" not in seen: 
         ses_cat_cols.append("income_band")
 
-    # Drop raw numeric columns that we have converted or don't need
+    # Drop raw numeric columns
     raw_numeric_drop = []
     for key in ["average_income"]:
         col = ses_map.get(key)
@@ -216,10 +215,8 @@ def build_ses_ui(df: pd.DataFrame, ses_cat_cols):
     st.subheader("Socio-economic inputs")
     cols = st.columns(2)
     for i, c in enumerate(ses_cols):
-        # Get unique values and clean them
         opts = sorted(df[c].astype(str).dropna().unique().tolist())
         
-        # Clean up "Unknown" handling
         if "Unknown" in opts:
             opts.remove("Unknown")
             opts = opts + ["Unknown"]
@@ -227,9 +224,11 @@ def build_ses_ui(df: pd.DataFrame, ses_cat_cols):
             opts = ["Unknown"]
             
         default = df[c].mode(dropna=True).iloc[0] if not df[c].dropna().empty else opts[0]
-        # Use column name as key to ensure uniqueness if necessary, though list is deduplicated
         with cols[i % 2]:
-            ses_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
+            # Added unique key to prevent duplicate ID errors
+            ses_vals[c] = st.selectbox(c, options=opts, 
+                                     index=(opts.index(default) if default in opts else 0),
+                                     key=f"ses_input_{c}")
     return ses_vals, ses_cols
 
 def include_ses_in_row(X_row: pd.DataFrame, ses_vals: dict, ses_cols_ui: list, df: pd.DataFrame):
