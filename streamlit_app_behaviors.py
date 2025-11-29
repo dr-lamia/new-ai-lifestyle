@@ -17,6 +17,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import PartialDependenceDisplay
 
 # Try XGBoost (optional)
 try:
@@ -41,8 +42,6 @@ BEHAVIOR_COLS = [
 ]
 
 # ======== OUTCOME COLUMNS (Findings) ========
-# These are the components of the Elham Index.
-# We will use these to RECALCULATE the index to ensure it is exactly the Sum of All Findings.
 ELHAM_FIELDS_PRESENT = [
     "missing_0_including_wisdom_", "decayed_1", "filled_2",
     "hypoplasia_3", "hypocalcification_4", "fluorosis_5",
@@ -52,7 +51,6 @@ ELHAM_FIELDS_PRESENT = [
     "veneer_f"
 ]
 
-# Other outcome indices to exclude from training features
 OTHER_OUTCOMES = ["dmf", "index_of_treatment"]
 
 def compute_elham_from_inputs(values_dict: dict):
@@ -233,14 +231,9 @@ def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = normalize_cats(df)
     
-    # -------------------------------------------------------------
-    # FIXED: Force Consistency
-    # Elham Index MUST BE the sum of all findings.
-    # We recalculate the target column to handle any potential data inconsistencies.
-    # -------------------------------------------------------------
+    # Recalculate target to ensure consistency
     findings_cols = [c for c in ELHAM_FIELDS_PRESENT if c in df.columns]
     if findings_cols:
-        # Fill NaNs with 0 for summation and ensure numeric
         temp_findings = df[findings_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
         df[TARGET_COL] = temp_findings.sum(axis=1)
 
@@ -250,7 +243,6 @@ def split_feature_types(df: pd.DataFrame):
     cat_cols = [c for c in BEHAVIOR_COLS if c in df.columns]
     num_cols = df.select_dtypes(exclude="object").columns.tolist()
     
-    # Exclude all outcome variables (findings & indices) from features
     exclude_cols = set(ID_COLS + [TARGET_COL] + ELHAM_FIELDS_PRESENT + OTHER_OUTCOMES)
     num_cols = [c for c in num_cols if c not in exclude_cols]
     
@@ -356,25 +348,6 @@ def plot_bar(items, title):
     fig.tight_layout()
     st.pyplot(fig)
 
-# =================== DETAILED ADVICE =============
-def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
-    plan = tier_plan(tier)
-    recs = [f"**Overall plan for {tier.title()} risk:**"]
-    
-    for name, val in all_behaviors.items():
-        v = str(val).lower()
-        if name == "tooth_brushing_frequency":
-            if "1" in v or "once" in v: recs.append("- Brush **twice daily**.")
-            if "irreg" in v: recs.append("- Set fixed times for brushing.")
-        if name == "interdental_cleaning" and "no" in v:
-             recs.append("- Start **daily interdental cleaning**.")
-        if name == "snacks_frequency" and ("3" in v or "often" in v):
-            recs.append("- **Cut snacks** to max 2/day.")
-        if name == "sugar" and ("freq" in v or "daily" in v):
-            recs.append("- **Reduce added sugars**.")
-            
-    return recs
-
 # =============== DATASET-DRIVEN UI OPTIONS ========================
 def _mode_or_unknown(series: pd.Series) -> str:
     m = series.dropna().astype(str)
@@ -465,8 +438,127 @@ def active_pipe_for_explain():
 
 # ========================= MODEL VISUALIZATIONS ===================
 st.subheader("Model visualizations")
-tab_perf, tab_imp = st.tabs(["📈 Performance", "⭐ Global importance"])
-with tab_perf: st.write("Performance plots loaded.")
+
+# Prepare data for visualizations
+X_all = df[num_cols + all_cat_cols].copy()
+y_all = df[TARGET_COL].astype(float).values
+X_tr_v, X_te_v, y_tr_v, y_te_v = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+
+VIS_SAMPLE_MAX = 400
+PDP_GRID = 15
+if len(X_te_v) > VIS_SAMPLE_MAX:
+    X_te_s = X_te_v.sample(VIS_SAMPLE_MAX, random_state=42)
+    y_te_s = y_te_v[X_te_s.index]
+else:
+    X_te_s, y_te_s = X_te_v, y_te_v
+
+y_pred_s = predict_with_choice(X_te_s)
+resid_s = y_te_s - y_pred_s
+
+tab_perf, tab_imp, tab_beh, tab_pdp = st.tabs(["📈 Performance", "⭐ Global importance", "🧠 Behaviour effects", "🧩 PDP / ICE"])
+
+with tab_perf:
+    with st.spinner("Drawing performance plots..."):
+        fig1, ax1 = plt.subplots()
+        ax1.scatter(y_te_s, y_pred_s, alpha=0.65)
+        lo = float(min(y_te_s.min(), y_pred_s.min()))
+        hi = float(max(y_te_s.max(), y_pred_s.max()))
+        ax1.plot([lo, hi], [lo, hi], 'k--')
+        ax1.set_xlabel("Actual Elham Index"); ax1.set_ylabel("Predicted Elham Index")
+        ax1.set_title("Predicted vs Actual (sampled hold-out)")
+        fig1.tight_layout(); st.pyplot(fig1); plt.close(fig1)
+
+        fig2, ax2 = plt.subplots()
+        ax2.hist(resid_s, bins=30); ax2.set_xlabel("Residual (Actual − Predicted)")
+        ax2.set_title("Residuals (sampled hold-out)")
+        fig2.tight_layout(); st.pyplot(fig2); plt.close(fig2)
+
+        fig3, ax3 = plt.subplots()
+        ax3.scatter(y_pred_s, resid_s, alpha=0.6); ax3.axhline(0, linestyle="--")
+        ax3.set_xlabel("Predicted"); ax3.set_ylabel("Residual")
+        ax3.set_title("Residuals vs Predicted (sampled hold-out)")
+        fig3.tight_layout(); st.pyplot(fig3); plt.close(fig3)
+
+with tab_imp:
+    try:
+        if model_choice == "XGBoost" and XGB_OK:
+            importances = xgb_pipe.named_steps["reg"].feature_importances_
+            trans_names = xgb_pipe.named_steps["pre"].get_feature_names_out().tolist()
+        elif model_choice == "Blend (avg RF+XGB)" and XGB_OK:
+            imp_rf = rf_pipe.named_steps["reg"].feature_importances_
+            imp_xgb = xgb_pipe.named_steps["reg"].feature_importances_
+            imp_rf = imp_rf / (imp_rf.sum() + 1e-12)
+            imp_xgb = imp_xgb / (imp_xgb.sum() + 1e-12)
+            importances = 0.5 * (imp_rf + imp_xgb)
+            trans_names = rf_pipe.named_steps["pre"].get_feature_names_out().tolist()
+        else:
+            importances = rf_pipe.named_steps["reg"].feature_importances_
+            trans_names = rf_pipe.named_steps["pre"].get_feature_names_out().tolist()
+
+        def _group_importances(trans_names, all_cat_cols, importances):
+            grouped = {}
+            for i, name in enumerate(trans_names):
+                if name.startswith("num__"):
+                    orig = name[len("num__"):]
+                elif name.startswith("cat__"):
+                    orig = None
+                    for c in all_cat_cols:
+                        pref = f"cat__{c}_"
+                        if name.startswith(pref):
+                            orig = c
+                            break
+                    if orig is None: orig = name
+                else:
+                    orig = name
+                grouped.setdefault(orig, 0.0)
+                grouped[orig] += float(importances[i])
+            return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
+
+        gitems = _group_importances(trans_names, all_cat_cols, importances)[:20]
+        fig5, ax5 = plt.subplots()
+        ax5.bar([k for k, _ in gitems], [v for _, v in gitems])
+        ax5.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
+        ax5.set_ylabel("Grouped importance (sum)"); ax5.set_title("Model importances (top 20)")
+        fig5.tight_layout(); st.pyplot(fig5); plt.close(fig5)
+    except Exception as e:
+        st.info(f"Importances not available: {e}")
+
+with tab_beh:
+    st.caption("Pick a behaviour to see mean predicted index by category (on sampled hold-out).")
+    if len(beh_cols) == 0:
+        st.info("No behaviour (categorical) columns detected.")
+    else:
+        beh_choice = st.selectbox("Behaviour", options=beh_cols)
+        if beh_choice not in X_te_s.columns:
+            st.info("Selected behaviour not found in the sampled set.")
+        else:
+            df_te = X_te_s.copy()
+            df_te["_yhat_"] = y_pred_s
+            levels = df_te[beh_choice].astype(str).value_counts().head(10).index.tolist()
+            means = []
+            for lv in levels:
+                m = float(df_te.loc[df_te[beh_choice].astype(str) == lv, "_yhat_"].mean())
+                if not np.isnan(m): means.append((lv, m))
+            means = sorted(means, key=lambda kv: kv[1], reverse=True)
+            fig6, ax6 = plt.subplots()
+            ax6.bar([k for k, _ in means], [v for _, v in means])
+            ax6.set_xticklabels([k for k, _ in means], rotation=45, ha="right")
+            ax6.set_ylabel("Mean predicted index"); ax6.set_title(f"{beh_choice}: mean predicted index by category")
+            fig6.tight_layout(); st.pyplot(fig6); plt.close(fig6)
+
+with tab_pdp:
+    st.caption("Partial dependence can be expensive. Toggle to compute.")
+    do_pdp = st.toggle("Compute PDP / ICE (fast mode)", value=False)
+    if do_pdp:
+        try:
+            active_pipe, active_name = active_pipe_for_explain()
+            pick = st.selectbox("Numeric feature", options=(num_cols[:3] if len(num_cols) >= 3 else num_cols))
+            fig7, ax7 = plt.subplots()
+            PartialDependenceDisplay.from_estimator(active_pipe, X_te_s, features=[pick], kind="average", grid_resolution=PDP_GRID, ax=ax7)
+            ax7.set_title(f"PDP · {pick} (sampled) · {active_name}")
+            fig7.tight_layout(); st.pyplot(fig7); plt.close(fig7)
+        except Exception as e:
+            st.info(f"PDP unavailable: {e}")
 
 # ------------------------ INPUT UI -----------------------
 st.subheader("Enter Elham Index (counts)")
