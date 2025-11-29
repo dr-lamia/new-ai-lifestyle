@@ -467,8 +467,9 @@ for i, c in enumerate(beh_cols):
     with cols[i % 2]:
         beh_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
 
-# SES UI via Module
-ses_vals, ses_cols_used = ses_utils.build_ses_ui(df, ses_cat_cols)
+# SES UI via Module (FIXED: Filter out columns already shown in behaviors)
+ses_cols_to_show = [c for c in ses_cat_cols if c not in beh_cols]
+ses_vals, ses_cols_used = ses_utils.build_ses_ui(df, ses_cols_to_show)
 
 # ------------------------- PREDICT -----------------------
 if st.button("Predict + Explain"):
