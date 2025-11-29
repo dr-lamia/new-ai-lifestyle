@@ -40,7 +40,9 @@ BEHAVIOR_COLS = [
     "mutans_load_in_saliva", "lactobacilli_load_in_saliva"
 ]
 
-# ======== ELHAM (subset) FIELDS ========
+# ======== OUTCOME COLUMNS (Findings) ========
+# These are the components of the Elham Index.
+# We will use these to RECALCULATE the index to ensure it is exactly the Sum of All Findings.
 ELHAM_FIELDS_PRESENT = [
     "missing_0_including_wisdom_", "decayed_1", "filled_2",
     "hypoplasia_3", "hypocalcification_4", "fluorosis_5",
@@ -49,6 +51,9 @@ ELHAM_FIELDS_PRESENT = [
     "crown_pontic", "crown_abutment", "crown_implant",
     "veneer_f"
 ]
+
+# Other outcome indices to exclude from training features
+OTHER_OUTCOMES = ["dmf", "index_of_treatment"]
 
 def compute_elham_from_inputs(values_dict: dict):
     per_item = {}
@@ -82,7 +87,6 @@ def norm_brushing_freq(v: str) -> str:
 def norm_snack_freq(v: str) -> str:
     s = str(v).strip().lower()
     if s in {"never", "none", "no", "0", "0/day"}: return "0/day"
-    # Capture "1", "2", "once", "twice", "1-2"
     if any(k in s for k in ["1", "2", "one", "two", "once", "twice", "few", "some"]): return "1–2/day"
     if any(k in s for k in [">2", "3", "many", "often", "frequent", "lot"]): return "3+/day"
     return _title(v)
@@ -227,12 +231,29 @@ def load_data(path: str) -> pd.DataFrame:
         st.error(f"Dataset not found at '{path}'.")
         st.stop()
     df = pd.read_csv(path)
-    return normalize_cats(df)
+    df = normalize_cats(df)
+    
+    # -------------------------------------------------------------
+    # FIXED: Force Consistency
+    # Elham Index MUST BE the sum of all findings.
+    # We recalculate the target column to handle any potential data inconsistencies.
+    # -------------------------------------------------------------
+    findings_cols = [c for c in ELHAM_FIELDS_PRESENT if c in df.columns]
+    if findings_cols:
+        # Fill NaNs with 0 for summation and ensure numeric
+        temp_findings = df[findings_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+        df[TARGET_COL] = temp_findings.sum(axis=1)
+
+    return df
 
 def split_feature_types(df: pd.DataFrame):
     cat_cols = [c for c in BEHAVIOR_COLS if c in df.columns]
     num_cols = df.select_dtypes(exclude="object").columns.tolist()
-    num_cols = [c for c in num_cols if c not in ID_COLS + [TARGET_COL]]
+    
+    # Exclude all outcome variables (findings & indices) from features
+    exclude_cols = set(ID_COLS + [TARGET_COL] + ELHAM_FIELDS_PRESENT + OTHER_OUTCOMES)
+    num_cols = [c for c in num_cols if c not in exclude_cols]
+    
     if TARGET_COL not in df.columns:
         st.error(f"Target column '{TARGET_COL}' not found.")
         st.stop()
@@ -467,7 +488,7 @@ for i, c in enumerate(beh_cols):
     with cols[i % 2]:
         beh_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
 
-# SES UI via Module (FIXED: Filter out columns already shown in behaviors)
+# SES UI via Module (Filter out columns already shown in behaviors)
 ses_cols_to_show = [c for c in ses_cat_cols if c not in beh_cols]
 ses_vals, ses_cols_used = ses_utils.build_ses_ui(df, ses_cols_to_show)
 
@@ -486,7 +507,7 @@ if st.button("Predict + Explain"):
 
     # 1) Compute Elham index
     entered_index, per_item = compute_elham_from_inputs(elham_core)
-    st.info(f"**Computed Elham’s Index: {entered_index:.0f}**")
+    st.info(f"**Computed Elham’s Index (Sum of findings): {entered_index:.0f}**")
 
     # 2) Predict
     y_hat = float(predict_with_choice(X_df)[0])
