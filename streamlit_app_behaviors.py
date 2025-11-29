@@ -1,5 +1,4 @@
 # streamlit_app_behaviors.py — Dental AI Coach (Behaviours + SES + Explainability)
-# with RandomForest + XGBoost + Blend + Final Insights
 
 import os
 import re
@@ -18,7 +17,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.inspection import PartialDependenceDisplay
 
 # Try XGBoost (optional)
 try:
@@ -34,7 +32,7 @@ DATA_PATH = "data/no_recommendation_dental_dataset_cleaned_keep_including_wisdom
 TARGET_COL = "elham_s_index_including_wisdom"
 ID_COLS = ["id"]
 
-# Behaviour feature list (column names present in your dataset)
+# Behaviour feature list
 BEHAVIOR_COLS = [
     "tooth_brushing_frequency", "time_of_tooth_brushing", "interdental_cleaning", "mouth_rinse",
     "snacks_frequency", "snack_content", "sugar", "sticky_food", "carbonated_beverages",
@@ -42,7 +40,7 @@ BEHAVIOR_COLS = [
     "mutans_load_in_saliva", "lactobacilli_load_in_saliva"
 ]
 
-# ======== ELHAM (subset) FIELDS YOU HAVE NOW ========
+# ======== ELHAM (subset) FIELDS ========
 ELHAM_FIELDS_PRESENT = [
     "missing_0_including_wisdom_", "decayed_1", "filled_2",
     "hypoplasia_3", "hypocalcification_4", "fluorosis_5",
@@ -62,7 +60,9 @@ def compute_elham_from_inputs(values_dict: dict):
     return total, per_item
 
 # ====================== BEHAVIOUR NORMALIZERS =====================
-def _title(v): return str(v).strip().title()
+def _title(v): 
+    s = str(v).strip().title()
+    return s if s.lower() != "unknown" else "Unknown"
 
 def norm_yes_no(v: str) -> str:
     s = str(v).strip().lower()
@@ -72,23 +72,26 @@ def norm_yes_no(v: str) -> str:
 
 def norm_brushing_freq(v: str) -> str:
     s = str(v).strip().lower()
-    if any(k in s for k in ["twice", "two", "2/day", "2 per", " 2 "]): return "2/day"
-    if any(k in s for k in ["once", "one", "1/day", "1 per", " 1 "]): return "1/day"
-    if "irreg" in s or "sometimes" in s: return "Irregular"
+    if any(k in s for k in ["twice", "two", "2/day", "2 per", " 2 ", "2 time"]): return "2/day"
+    if any(k in s for k in ["more than", "3+", ">2"]): return "2+/day"
+    if any(k in s for k in ["once", "one", "1/day", "1 per", " 1 ", "1 time", "daily"]): return "1/day"
+    if any(k in s for k in ["week", "irreg", "sometimes", "rarely"]): return "Weekly/Irregular"
+    if "never" in s: return "Never"
     return _title(v)
 
 def norm_snack_freq(v: str) -> str:
     s = str(v).strip().lower()
     if s in {"never", "none", "no", "0", "0/day"}: return "0/day"
-    if any(k in s for k in ["1-2", "1–2", "sometimes", "occasional", "few"]): return "1–2/day"
-    if any(k in s for k in [">2", "3+", "many", "often", "frequent", "a lot"]): return "3+/day"
+    # Capture "1", "2", "once", "twice", "1-2"
+    if any(k in s for k in ["1", "2", "one", "two", "once", "twice", "few", "some"]): return "1–2/day"
+    if any(k in s for k in [">2", "3", "many", "often", "frequent", "lot"]): return "3+/day"
     return _title(v)
 
 def norm_risk_freq(v: str) -> str:
     s = str(v).strip().lower()
     if s in {"none", "no", "never", "0"}: return "None"
-    if any(k in s for k in ["occas", "some", "rare"]): return "Occasional"
-    if any(k in s for k in ["freq", "often", "daily", "many"]): return "Frequent"
+    if any(k in s for k in ["occas", "some", "rare", "few", "1", "2"]): return "Occasional"
+    if any(k in s for k in ["freq", "often", "daily", "many", "3"]): return "Frequent"
     return _title(v)
 
 def norm_saliva_level(v: str) -> str:
@@ -100,8 +103,8 @@ def norm_saliva_level(v: str) -> str:
 
 def norm_mutans_lacto(v: str) -> str:
     s = str(v).strip().lower()
-    if "more" in s or ">" in s or "10^5" in s or "10)5" in s: return "High"
-    if "less" in s or "<" in s: return "Low"
+    if "more" in s or ">" in s or "10^5" in s or "10)5" in s or "high" in s: return "High"
+    if "less" in s or "<" in s or "low" in s: return "Low"
     return "Normal" if "normal" in s else _title(v)
 
 NORMALIZERS = {
@@ -131,7 +134,6 @@ def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
     for c in df.select_dtypes(include="object").columns:
         df[c] = df[c].astype(str).str.strip()
     return df
-
 
 # ========================= RISK TIERS =============================
 def build_risk_bins(df, target_col=TARGET_COL):
@@ -184,47 +186,45 @@ def treatment_plan_from_elham(counts: dict, tier: str):
         "—"
     ]
     if n("decayed_1") > 0:
-        out += [f"• Caries on **{n('decayed_1')}** tooth/teeth → **restore** (GIC/composite); pulpal diagnosis if deep.", "  - Add fluoride varnish and sugar frequency counseling."]
+        out += [f"• Caries on **{n('decayed_1')}** tooth/teeth → **restore** (GIC/composite).", "  - Add fluoride varnish and sugar frequency counseling."]
     if n("filled_2") > 0:
         out += [f"• **{n('filled_2')}** restoration(s) → check margins; repair/polish if needed."]
     if n("hypoplasia_3") > 0 or n("hypocalcification_4") > 0:
-        out += [f"• Enamel defects (hypoplasia: {n('hypoplasia_3')}, hypocalcification: {n('hypocalcification_4')}) →", "  - **Sealants / resin infiltration**, fluoride varnish for sensitivity."]
+        out += [f"• Enamel defects → **Sealants / resin infiltration**, fluoride varnish for sensitivity."]
     if n("fluorosis_5") > 0:
         out += [f"• **Fluorosis** ({n('fluorosis_5')}) → microabrasion ± external bleaching."]
     if n("erosion_6") > 0:
-        out += [f"• **Erosion** ({n('erosion_6')}) → acid control, straw use, rinse water; high-fluoride paste; restore if dentin exposed."]
+        out += [f"• **Erosion** ({n('erosion_6')}) → acid control, straw use, rinse water; high-fluoride paste."]
     if n("abrasion_7") > 0:
-        out += [f"• **Abrasion** ({n('abrasion_7')}) → brushing technique coaching; soft brush; desensitizing paste; restore if needed."]
+        out += [f"• **Abrasion** ({n('abrasion_7')}) → brushing technique coaching; soft brush; desensitizing paste."]
     if n("attrition_8") > 0:
-        out += [f"• **Attrition** ({n('attrition_8')}) → assess parafunction; **night guard** consideration; restore worn facets if indicated."]
+        out += [f"• **Attrition** ({n('attrition_8')}) → assess parafunction; **night guard** consideration."]
     if n("abfraction_9") > 0:
-        out += [f"• **Abfraction** ({n('abfraction_9')}) → manage occlusal load; restore if sensitive or deep."]
+        out += [f"• **Abfraction** ({n('abfraction_9')}) → manage occlusal load."]
     if n("fractured_h") > 0:
-        out += [f"• **Fracture** ({n('fractured_h')}) → immediate protection; definitive onlay/crown after assessment."]
+        out += [f"• **Fracture** ({n('fractured_h')}) → immediate protection."]
     if n("sealant_a") > 0:
-        out += [f"• **Sealants** present ({n('sealant_a')}) → check retention; re-seal where partial loss."]
+        out += [f"• **Sealants** present ({n('sealant_a')}) → check retention."]
     if n("missing_0_including_wisdom_") > 0:
-        out += [f"• **Missing teeth** (incl. wisdom): {n('missing_0_including_wisdom_')} → discuss replacement needs."]
+        out += [f"• **Missing teeth**: {n('missing_0_including_wisdom_')} → discuss replacement needs."]
     if n("crown_pontic") > 0 or n("crown_abutment") > 0:
-        out += [f"• **Bridge** (pontic {n('crown_pontic')}, abutment {n('crown_abutment')}) → super-floss/interdental brushes; margin review."]
+        out += [f"• **Bridge** → super-floss/interdental brushes; margin review."]
     if n("crown_implant") > 0:
-        out += [f"• **Implant crowns** ({n('crown_implant')}) → implant maintenance; peri-implant screening."]
+        out += [f"• **Implant crowns** ({n('crown_implant')}) → implant maintenance."]
     if n("veneer_f") > 0:
-        out += [f"• **Veneers** ({n('veneer_f')}) → hygiene at margins; composite repair if chipping."]
+        out += [f"• **Veneers** ({n('veneer_f')}) → hygiene at margins."]
     out += ["—", "• Reinforce personalized diet & hygiene education (see behaviour section).", f"• Recall per tier: **{plan['recall']}**."]
     return out
 
 # ==================== PREPROCESS / TRAINING =======================
 def make_ohe() -> OneHotEncoder:
-    try:
-        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+    try: return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError: return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
-        st.error(f"Dataset not found at '{path}'. Put the CSV in a 'data' folder with this exact name.")
+        st.error(f"Dataset not found at '{path}'.")
         st.stop()
     df = pd.read_csv(path)
     return normalize_cats(df)
@@ -326,9 +326,7 @@ def group_shap_by_original(feature_names, shap_vals, num_cols, cat_cols):
     return sorted(grouped.items(), key=lambda kv: abs(kv[1]), reverse=True)
 
 def plot_bar(items, title):
-    if not items:
-        st.info("Nothing to show.")
-        return
+    if not items: return
     fig, ax = plt.subplots()
     ax.bar([k for k, _ in items], [v for _, v in items])
     ax.set_xticklabels([k for k, _ in items], rotation=45, ha="right")
@@ -337,34 +335,22 @@ def plot_bar(items, title):
     fig.tight_layout()
     st.pyplot(fig)
 
-# =================== DETAILED ADVICE (ALL BEHAVIOURS) =============
+# =================== DETAILED ADVICE =============
 def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
     plan = tier_plan(tier)
-    recs = [
-        f"**Overall plan for {tier.title()} risk:**",
-        f"- Recall: **{plan['recall']}**",
-        f"- Toothpaste: **{plan['toothpaste']}**",
-        f"- Mouthrinse: **{plan['rinse']}**",
-        f"- Varnish: **{plan['varnish']}**",
-        f"- Diet focus: **{plan['diet_focus']}**",
-    ]
+    recs = [f"**Overall plan for {tier.title()} risk:**"]
     
-    # Behavior logic
     for name, val in all_behaviors.items():
         v = str(val).lower()
         if name == "tooth_brushing_frequency":
-            if "1" in v or "once" in v:
-                recs.append("- Brush **twice daily** with fluoride toothpaste.")
-            elif "irregular" in v:
-                recs.append("- Set **fixed times** for brushing.")
-        if name == "interdental_cleaning" and ("no" in v or "unknown" in v):
+            if "1" in v or "once" in v: recs.append("- Brush **twice daily**.")
+            if "irreg" in v: recs.append("- Set fixed times for brushing.")
+        if name == "interdental_cleaning" and "no" in v:
              recs.append("- Start **daily interdental cleaning**.")
         if name == "snacks_frequency" and ("3" in v or "often" in v):
-            recs.append("- **Cut snacks** to max 2/day; sweets with meals.")
+            recs.append("- **Cut snacks** to max 2/day.")
         if name == "sugar" and ("freq" in v or "daily" in v):
             recs.append("- **Reduce added sugars**.")
-        if name == "carbonated_beverages" and ("freq" in v or "daily" in v):
-            recs.append("- **Limit acidic drinks**; use a straw.")
             
     return recs
 
@@ -374,16 +360,14 @@ def _mode_or_unknown(series: pd.Series) -> str:
     return m.mode().iloc[0] if not m.empty and not m.mode().empty else "Unknown"
 
 PREFERRED_ORDER = {
-    "tooth_brushing_frequency": ["Irregular", "1/day", "2/day"],
+    "tooth_brushing_frequency": ["Weekly/Irregular", "1/day", "2/day", "2+/day", "Never"],
     "interdental_cleaning": ["No", "Yes"],
     "mouth_rinse": ["No", "Yes"],
     "snacks_frequency": ["0/day", "1–2/day", "3+/day"],
     "sugar": ["None", "Occasional", "Frequent"],
     "carbonated_beverages": ["None", "Occasional", "Frequent"],
     "sticky_food": ["No", "Yes"],
-    "hydration": ["Low", "Normal", "High"],
-    "salivary_ph": ["Low", "Normal", "High"],
-    "pocket_band": ["Low", "Medium", "High", "Unknown"], 
+    "pocket_money": ["No", "Yes", "Unknown"],
     "income_band": ["Low", "Medium", "High", "Unknown"],
 }
 
@@ -410,12 +394,10 @@ def build_options_from_df(df: pd.DataFrame, cols):
 def default_from_df(df: pd.DataFrame, col: str) -> str:
     return _mode_or_unknown(df[col]) if col in df.columns else "Unknown"
 
-
 # =============================== UI ===============================
 st.title("🦷 AI tool for personalized awareness and education")
 
-if not XGB_OK:
-    st.caption("ℹ️ XGBoost not installed — using RandomForest only.")
+if not XGB_OK: st.caption("ℹ️ XGBoost not installed — using RandomForest only.")
 
 if st.button("🔁 Force clear cache"):
     st.cache_data.clear()
@@ -424,18 +406,14 @@ if st.button("🔁 Force clear cache"):
 
 df = load_data(DATA_PATH)
 
-# SES prep using the module
+# SES prep
 idx_train, idx_test = train_test_split(df.index, test_size=0.2, random_state=42)
 df, ses_cat_cols, raw_numeric_ses, ses_meta = ses_utils.prepare_ses(df, train_idx=idx_train)
 
-# UI lists and dataset-driven options
+# UI lists
 beh_cols = [c for c in BEHAVIOR_COLS if c in df.columns]
 cat_cols_all = beh_cols + [c for c in ses_cat_cols if c not in beh_cols]
 beh_options = build_options_from_df(df, beh_cols)
-
-# SES options will be built via ses_utils helper or manually if preferred
-ses_cols_ui = [c for c in cat_cols_all if c not in beh_cols]
-ses_options = build_options_from_df(df, ses_cols_ui)
 
 # Train models
 rf_pipe, xgb_pipe, metrics_all, num_cols, all_cat_cols, feat_names, risk_bins = \
@@ -443,8 +421,7 @@ rf_pipe, xgb_pipe, metrics_all, num_cols, all_cat_cols, feat_names, risk_bins = 
 
 # Model selector
 model_choices = ["RandomForest"]
-if XGB_OK:
-    model_choices += ["XGBoost", "Blend (avg RF+XGB)"]
+if XGB_OK: model_choices += ["XGBoost", "Blend (avg RF+XGB)"]
 model_choice = st.selectbox("Model to use", options=model_choices)
 
 # Show metrics
@@ -452,32 +429,23 @@ mcols = st.columns(len(model_choices))
 for i, name in enumerate(model_choices):
     m = metrics_all.get(name)
     if m:
-        with mcols[i]:
-            st.metric(name, f"R² {m['R2']:.3f}", delta=f"MAE {m['MAE']:.2f}")
+        with mcols[i]: st.metric(name, f"R² {m['R2']:.3f}", delta=f"MAE {m['MAE']:.2f}")
 
 def predict_with_choice(X):
-    if model_choice == "RandomForest":
-        return rf_pipe.predict(X)
-    elif model_choice == "XGBoost" and XGB_OK:
-        return xgb_pipe.predict(X)
-    else:  # Blend
-        if XGB_OK:
-            return 0.5 * (rf_pipe.predict(X) + xgb_pipe.predict(X))
-        return rf_pipe.predict(X)
+    if model_choice == "RandomForest": return rf_pipe.predict(X)
+    elif model_choice == "XGBoost" and XGB_OK: return xgb_pipe.predict(X)
+    else: return 0.5 * (rf_pipe.predict(X) + xgb_pipe.predict(X))
 
 def active_pipe_for_explain():
-    if model_choice == "RandomForest" or not XGB_OK:
-        return rf_pipe, "RandomForest"
-    if model_choice == "XGBoost":
-        return xgb_pipe, "XGBoost"
+    if model_choice == "RandomForest" or not XGB_OK: return rf_pipe, "RandomForest"
+    if model_choice == "XGBoost": return xgb_pipe, "XGBoost"
     best = max(("RandomForest", "XGBoost"), key=lambda k: metrics_all[k]["R2"])
     return (rf_pipe if best == "RandomForest" else xgb_pipe), best
 
 # ========================= MODEL VISUALIZATIONS ===================
 st.subheader("Model visualizations")
 tab_perf, tab_imp = st.tabs(["📈 Performance", "⭐ Global importance"])
-with tab_perf:
-    st.write("Performance plots loaded.") # (Placeholder for plots)
+with tab_perf: st.write("Performance plots loaded.")
 
 # ------------------------ INPUT UI -----------------------
 st.subheader("Enter Elham Index (counts)")
@@ -486,11 +454,9 @@ elham_core = {}
 present_elham_fields = [c for c in ELHAM_FIELDS_PRESENT if c in df.columns]
 mid = len(present_elham_fields) // 2
 for k in present_elham_fields[:mid]:
-    with left:
-        elham_core[k] = st.number_input(k, min_value=0, step=1, value=0)
+    with left: elham_core[k] = st.number_input(k, min_value=0, step=1, value=0)
 for k in present_elham_fields[mid:]:
-    with right:
-        elham_core[k] = st.number_input(k, min_value=0, step=1, value=0)
+    with right: elham_core[k] = st.number_input(k, min_value=0, step=1, value=0)
 
 # Behaviours UI
 st.subheader("Behavior & lifestyle inputs")
@@ -507,13 +473,10 @@ ses_vals, ses_cols_used = ses_utils.build_ses_ui(df, ses_cat_cols)
 # ------------------------- PREDICT -----------------------
 if st.button("Predict + Explain"):
     X_row = {c: float(elham_core.get(c, 0)) for c in num_cols if c in elham_core}
-    # Fill remaining numerics with median
     for c in num_cols:
-        if c not in X_row:
-            X_row[c] = df[c].median()
+        if c not in X_row: X_row[c] = df[c].median()
 
-    for c in beh_cols:
-        X_row[c] = beh_vals.get(c, default_from_df(df, c))
+    for c in beh_cols: X_row[c] = beh_vals.get(c, default_from_df(df, c))
     
     # Add SES values
     X_row = ses_utils.include_ses_in_row(X_row, ses_vals, ses_cols_used, df)
@@ -531,8 +494,7 @@ if st.button("Predict + Explain"):
     # 3) Tier & Plan
     tier = index_tier(entered_index, risk_bins)
     st.info(f"Risk tier: **{tier.title()}**")
-    for line in treatment_plan_from_elham(per_item, tier):
-        st.markdown(line)
+    for line in treatment_plan_from_elham(per_item, tier): st.markdown(line)
 
     # 4) Explain
     try:
